@@ -56,7 +56,7 @@ app.get("/api/shorturl/:shortUrlId", async (req, res) => {
 	}
 });
 
-app.post("/api/shorturl/new", (req, res) => {
+app.post("/api/shorturl", (req, res) => {
 	const protocolRegex = /^https?:\/\//;
 	const initialUrl = req.body.url;
 	let domain;
