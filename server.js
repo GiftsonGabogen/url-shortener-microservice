@@ -1,120 +1,114 @@
-require("dotenv").config();
+"use strict";
+
 const express = require("express");
-const cors = require("cors");
-const mongodb = require("mongodb");
+const mongo = require("mongodb");
 const mongoose = require("mongoose");
-const shortId = require("shortid");
 const bodyParser = require("body-parser");
-const uri = process.env.MONGO_URI;
-const app = express();
 const dns = require("dns");
-const options = {
-	family: 6,
-	hints: dns.ADDRCONFIG | dns.V4MAPPED,
-};
-options.all = true;
+
+const cors = require("cors");
+
+const app = express();
+
 const port = process.env.PORT || 3000;
 
-app.use(bodyParser.urlencoded({ extended: false }));
+mongoose.connect(
+	process.env.MONGO_URI,
+	{ useNewUrlParser: true, useUnifiedTopology: true, useFindAndModify: false },
+	(err) => {
+		err ? console.log(err) : console.log("connected to db!");
+	}
+);
+
 app.use(cors());
-app.use(express.json());
+app.use(bodyParser.urlencoded({ extended: "false" }));
+app.use("/public", express.static(process.cwd() + "/public"));
 
-mongoose.connect(uri, {
-	useNewUrlParser: true,
-	useUnifiedTopology: true,
-	serverSelectionTimeoutMS: 5000,
-});
-const connection = mongoose.connection;
-connection.once("open", () => {
-	console.log("MongoDB database connection established successfully");
-});
+let urlSchema = new mongoose.Schema(
+	{
+		url: { type: String, required: true },
+		shortUrl: { type: Number, required: true },
+	},
+	{ collection: "urls" }
+);
+let Url = mongoose.model("Url", urlSchema, "urls");
 
-app.use("/public", express.static(`${process.cwd()}/public`));
+let urlCounterSchema = new mongoose.Schema(
+	{
+		_id: { type: String, required: true },
+		sequence_value: { type: Number, required: true },
+	},
+	{ collection: "urlCounters" }
+);
+let UrlCounter = mongoose.model("UrlCounter", urlCounterSchema, "urlCounters");
 
 app.get("/", function (req, res) {
 	res.sendFile(process.cwd() + "/views/index.html");
 });
 
-//Create Schema
-const Schema = mongoose.Schema;
-const urlSchema = new Schema({
-	original_url: String,
-	short_url: String,
-});
-const URL = mongoose.model("URL", urlSchema);
-let urlExtractor = function (url) {
-	let urlSplit;
-	if (url.indexOf("https") > -1) {
-		urlSplit = url.split("https://");
-	} else if (url.indexOf("http") > -1) {
-		urlSplit = url.split("http://");
-	}
-	if (urlSplit === undefined) {
-		return urlSplit;
-	} else {
-		return urlSplit[1].split("/")[0];
-	}
-};
-app.post("/api/shorturl/new", async function (req, res) {
-	const url = req.body.url;
-	const urlCode = shortId.generate();
-
-	let testURL = req.body.url;
-	testURL = urlExtractor(testURL);
-
-	if (testURL) {
-		dns.resolve(testURL, async (err, address, family) => {
-			if (err) {
-				res.json({ error: "invalid URL" });
-			} else {
-				try {
-					// check if its already in the database
-					let findOne = await URL.findOne({
-						original_url: url,
-					});
-					if (findOne) {
-						res.json({
-							original_url: findOne.original_url,
-							short_url: findOne.short_url,
-						});
-					} else {
-						findOne = new URL({
-							original_url: url,
-							short_url: urlCode,
-						});
-						await findOne.save();
-						res.json({
-							original_url: findOne.original_url,
-							short_url: findOne.short_url,
-						});
-					}
-				} catch (err) {
-					console.error(err);
-					res.status(500).json("Server erorr...");
-				}
-			}
-		});
-	} else {
+app.get("/api/shorturl/:shortUrlId", async (req, res) => {
+	try {
+		let address = await Url.findOne({ shortUrl: req.params.shortUrlId });
+		console.log("address", address);
+		res.redirect(address.url);
+	} catch (err) {
 		res.json({ error: "invalid URL" });
 	}
 });
 
-app.get("/api/shorturl/:short_url?", async function (req, res) {
-	try {
-		const urlParams = await URL.findOne({
-			short_url: req.params.short_url,
-		});
-		if (urlParams) {
-			return res.redirect(urlParams.original_url);
-		} else {
-			return res.status(404).json("No URL found");
-		}
-	} catch (err) {
-		console.log(err);
-		res.status(500).json("Server error");
+app.post("/api/shorturl/new", (req, res) => {
+	const protocolRegex = /^https?:\/\//;
+	const initialUrl = req.body.url;
+	let domain;
+	if (protocolRegex.test(initialUrl)) {
+		let tempUrl = initialUrl.slice(initialUrl.indexOf("//") + 2);
+		domain =
+			tempUrl.indexOf("/") > 0
+				? tempUrl.slice(0, tempUrl.indexOf("/"))
+				: tempUrl;
+	} else {
+		domain =
+			initialUrl.indexOf("/") > 0
+				? initialUrl.slice(0, initialUrl.indexOf("/"))
+				: initialUrl;
 	}
+
+	async function getNextSequenceValue(sequenceName) {
+		const sequenceDocument = await UrlCounter.findOneAndUpdate(
+			{ _id: sequenceName },
+			{ $inc: { sequence_value: 1 } },
+			{ new: true }
+		);
+		return sequenceDocument.sequence_value;
+	}
+
+	dns.lookup(domain, async (err, address, family) => {
+		if (err) {
+			console.log(err);
+			res.json({ error: "invalid URL" });
+		} else {
+			try {
+				let urlFound = await Url.findOne({ url: initialUrl });
+				if (urlFound) {
+					res.json({ original_url: initialUrl, short_url: urlFound.shortUrl });
+				} else {
+					let sequenceValue = await getNextSequenceValue("shortUrlId");
+					let urlAdded = await Url.create({
+						url: initialUrl,
+						shortUrl: sequenceValue,
+					});
+					res.json({
+						original_url: urlAdded.url,
+						short_url: urlAdded.shortUrl,
+					});
+				}
+			} catch (err) {
+				console.log(err);
+			}
+		}
+	});
 });
 
 app.listen(port, function () {
-	console.log(`Listening on port ${port}`);
+	console.log("Node.js listening ...");
 });
